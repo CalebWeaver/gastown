@@ -370,4 +370,98 @@ esac
 	if s.ReadyCount != 0 {
 		t.Errorf("stuck convoy ReadyCount = %d, want 0", s.ReadyCount)
 	}
+	if s.AllComplete {
+		t.Errorf("stuck convoy AllComplete = true, want false (issues are open/blocked, not closed)")
+	}
+}
+
+// TestFindStrandedConvoys_AllComplete verifies that a convoy where all tracked
+// issues are closed gets AllComplete=true in the stranded list, enabling the
+// daemon's periodic scan to auto-close it even if the event-driven path missed it.
+func TestFindStrandedConvoys_AllComplete(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping convoy test on Windows")
+	}
+
+	binDir := t.TempDir()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(`{"prefix":"gt-","path":"gastown/mayor/rig"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write routes: %v", err)
+	}
+
+	bdPath := filepath.Join(binDir, "bd")
+
+	// Mock bd: convoy has tracked issues that are ALL closed.
+	script := `#!/bin/sh
+i=0
+for arg in "$@"; do
+  case "$arg" in
+    --*) ;;
+    *) eval "pos$i=\"$arg\""; i=$((i+1)) ;;
+  esac
+done
+
+case "$pos0" in
+  list)
+    echo '[{"id":"hq-done1","title":"Completed convoy"}]'
+    exit 0
+    ;;
+  sql)
+    # bdDepListRawIDs: return tracked bead IDs
+    echo '[{"depends_on_id":"gt-done1"},{"depends_on_id":"gt-done2"}]'
+    exit 0
+    ;;
+  dep)
+    echo '[{"id":"gt-done1","title":"Done issue 1","status":"closed","issue_type":"task","assignee":"","dependency_type":"tracks"},{"id":"gt-done2","title":"Done issue 2","status":"closed","issue_type":"task","assignee":"","dependency_type":"tracks"}]'
+    exit 0
+    ;;
+  show)
+    echo '[{"id":"gt-done1","title":"Done issue 1","status":"closed","issue_type":"task","assignee":"","dependencies":[]},{"id":"gt-done2","title":"Done issue 2","status":"closed","issue_type":"task","assignee":"","dependencies":[]}]'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(bdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stranded, err := findStrandedConvoys(townRoot)
+	if err != nil {
+		t.Fatalf("findStrandedConvoys() error: %v", err)
+	}
+
+	if len(stranded) != 1 {
+		t.Fatalf("expected 1 stranded convoy (all complete), got %d", len(stranded))
+	}
+
+	s := stranded[0]
+	if s.ID != "hq-done1" {
+		t.Errorf("stranded convoy ID = %q, want %q", s.ID, "hq-done1")
+	}
+	if s.TrackedCount != 2 {
+		t.Errorf("completed convoy TrackedCount = %d, want 2", s.TrackedCount)
+	}
+	if s.ReadyCount != 0 {
+		t.Errorf("completed convoy ReadyCount = %d, want 0", s.ReadyCount)
+	}
+	if !s.AllComplete {
+		t.Errorf("completed convoy AllComplete = false, want true (all tracked issues are closed)")
+	}
+
+	// Verify JSON serialization includes all_complete field
+	jsonBytes, err := json.Marshal(stranded)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(jsonBytes), `"all_complete":true`) {
+		t.Errorf("JSON output missing all_complete:true, got: %s", jsonBytes)
+	}
 }

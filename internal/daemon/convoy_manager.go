@@ -36,6 +36,7 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string  `json:"ready_issues"`
 	CreatedAt    time.Time `json:"created_at"`
 	BaseBranch   string    `json:"base_branch,omitempty"`
+	AllComplete  bool      `json:"all_complete,omitempty"`
 }
 
 // ConvoyManager monitors beads events for issue closes and periodically scans for stranded convoys.
@@ -396,9 +397,14 @@ func (m *ConvoyManager) scan() {
 				continue
 			}
 			m.closeEmptyConvoy(c.ID)
+		} else if c.AllComplete {
+			// All tracked issues are closed — convoy should auto-close.
+			// This handles the case where the event-driven path missed the
+			// close (e.g., daemon was down when the last issue was closed).
+			m.closeCompletedConvoy(c.ID)
 		} else {
-			// Tracked issues exist but none are ready. This requires agent
-			// judgment (the deacon decides what to do). Log for visibility.
+			// Tracked issues exist but none are ready (blocked, in-progress).
+			// This requires agent judgment (the deacon decides what to do). Log for visibility.
 			m.logger("Convoy %s: %d tracked issues, 0 ready — needs agent review", c.ID, c.TrackedCount)
 		}
 	}
@@ -480,6 +486,24 @@ func (m *ConvoyManager) feedFirstReady(c strandedConvoyInfo) {
 // closeEmptyConvoy runs gt convoy check to auto-close an empty convoy.
 func (m *ConvoyManager) closeEmptyConvoy(convoyID string) {
 	m.logger("Convoy %s: auto-closing (empty)", convoyID)
+
+	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
+	cmd.Dir = m.townRoot
+	util.SetProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		m.logger("Convoy %s: check failed: %s", convoyID, util.FirstLine(stderr.String()))
+	}
+}
+
+// closeCompletedConvoy runs gt convoy check to auto-close a convoy where all
+// tracked issues are complete. This is the periodic-scan fallback for the case
+// where the event-driven path (CheckConvoysForIssue) missed the close, e.g.,
+// because the daemon was down when the last tracked issue was closed.
+func (m *ConvoyManager) closeCompletedConvoy(convoyID string) {
+	m.logger("Convoy %s: auto-closing (all tracked issues complete)", convoyID)
 
 	cmd := exec.CommandContext(m.ctx, m.gtPath, "convoy", "check", convoyID)
 	cmd.Dir = m.townRoot

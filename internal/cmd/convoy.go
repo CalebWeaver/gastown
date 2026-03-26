@@ -1395,6 +1395,7 @@ type strandedConvoyInfo struct {
 	ReadyIssues  []string `json:"ready_issues"`
 	CreatedAt    string   `json:"created_at,omitempty"`
 	BaseBranch   string   `json:"base_branch,omitempty"`
+	AllComplete  bool     `json:"all_complete,omitempty"`
 }
 
 // readyIssueInfo holds info about a ready (stranded) issue.
@@ -1431,6 +1432,8 @@ func runConvoyStranded(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  🚚 %s: %s\n", s.ID, s.Title)
 		if s.ReadyCount == 0 && s.TrackedCount == 0 {
 			fmt.Printf("     Empty convoy (0 tracked issues) — needs cleanup\n")
+		} else if s.ReadyCount == 0 && s.AllComplete {
+			fmt.Printf("     All %d tracked issue(s) complete — ready to auto-close\n", s.TrackedCount)
 		} else if s.ReadyCount == 0 && s.TrackedCount > 0 {
 			fmt.Printf("     %d tracked issues, 0 ready — needs agent review\n", s.TrackedCount)
 		} else {
@@ -1548,7 +1551,11 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		scheduledSet := areScheduled(trackedIDs)
 
 		var readyIssues []string
+		allComplete := true
 		for _, t := range tracked {
+			if t.Status != "closed" && t.Status != "tombstone" {
+				allComplete = false
+			}
 			if isReadyIssue(t, scheduledSet) {
 				if !isSlingableBead(townBeads, t.ID) {
 					continue
@@ -1573,6 +1580,8 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 		} else {
 			// Has tracked issues but none are ready — include in stranded
 			// list so callers can distinguish from truly empty convoys.
+			// AllComplete=true when all tracked issues are closed/tombstone,
+			// indicating the convoy can be auto-closed.
 			stranded = append(stranded, strandedConvoyInfo{
 				ID:           convoy.ID,
 				Title:        convoy.Title,
@@ -1581,6 +1590,7 @@ func findStrandedConvoys(townBeads string) ([]strandedConvoyInfo, error) {
 				ReadyIssues:  []string{},
 				CreatedAt:    convoy.CreatedAt,
 				BaseBranch:   baseBranch,
+				AllComplete:  allComplete,
 			})
 		}
 	}

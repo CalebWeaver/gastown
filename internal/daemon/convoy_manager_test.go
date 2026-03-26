@@ -379,6 +379,84 @@ func TestScanStranded_NoStrandedConvoys(t *testing.T) {
 	}
 }
 
+func TestScanStranded_ClosesCompletedConvoy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// Convoy with all tracked issues closed (all_complete=true).
+	// The periodic scan must call gt convoy check to auto-close it.
+	paths := mockGtForScanTest(t, scanTestOpts{
+		strandedJSON: `[{"id":"hq-done1","title":"Done","tracked_count":1,"ready_count":0,"ready_issues":[],"all_complete":true}]`,
+	})
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m.scan()
+
+	data, err := os.ReadFile(paths.checkLogPath)
+	if err != nil {
+		t.Fatalf("read check log: %v — convoy check was not called", err)
+	}
+	if !strings.Contains(string(data), "hq-done1") {
+		t.Errorf("expected gt convoy check for hq-done1, got: %q", data)
+	}
+
+	// Verify log says "all tracked issues complete"
+	found := false
+	for _, s := range logged {
+		if strings.Contains(s, "hq-done1") && strings.Contains(s, "complete") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected completion log for hq-done1, got: %v", logged)
+	}
+}
+
+func TestScanStranded_StuckConvoyNotClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	// Convoy with tracked issues that are blocked/in-progress (all_complete=false).
+	// The periodic scan must NOT auto-close it — it needs agent review.
+	paths := mockGtForScanTest(t, scanTestOpts{
+		strandedJSON: `[{"id":"hq-stuck1","title":"Stuck","tracked_count":2,"ready_count":0,"ready_issues":[],"all_complete":false}]`,
+	})
+
+	var logged []string
+	logger := func(format string, args ...interface{}) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+
+	m := NewConvoyManager(paths.townRoot, logger, "gt", 10*time.Minute, nil, nil, nil)
+	m.scan()
+
+	// Negative: convoy check must NOT have been called
+	if _, err := os.Stat(paths.checkLogPath); err == nil {
+		data, _ := os.ReadFile(paths.checkLogPath)
+		t.Errorf("convoy check was called for stuck convoy (should need agent review): %s", data)
+	}
+
+	// Should log "needs agent review"
+	found := false
+	for _, s := range logged {
+		if strings.Contains(s, "hq-stuck1") && strings.Contains(s, "needs agent review") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'needs agent review' log for hq-stuck1, got: %v", logged)
+	}
+}
+
 func TestScanStranded_DispatchFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on Windows")
